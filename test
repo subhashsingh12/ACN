@@ -1,0 +1,146 @@
+#!/usr/bin/env ruby
+
+#
+# Initialization and parameter checking
+#
+
+require 'open3'
+require 'uri'
+
+%w{ BRANCH BUILD_NUMBER TMO_CORP_GIT_BASE_URL }.each do |v|
+	throw "#{v} not defined" if !ENV.has_key?(v) || ENV[v].nil? || ENV[v].empty?
+end
+
+git_root = ENV['TMO_CORP_GIT_BASE_URL']
+scm_url = "#{git_root}/mez/mezzo"
+
+
+
+STDERR.puts "\n\n\nSCM URL Root: #{git_root}"
+
+#
+# Methods
+#
+
+def do_commands commands
+	commands = [commands] unless commands.is_a?(Array)
+    
+	commands.each do |cmd|
+		STDOUT.puts "\n\nCommand:\n\n#{cmd.inspect}\n\n"
+
+		resp, status = Open3.capture2e(cmd)
+
+		if status.exitstatus != 0
+			STDERR.puts "\nFAILED - Status: #{status.inspect}\nResponse: \n#{resp}\n"
+	    	throw "Command #{cmd} failed"
+        else
+			STDOUT.puts "\nStatus: #{status.exitstatus}\nResponse: \n\n#{resp[0..2000]}\n\n"
+	    end
+	end
+end
+
+#
+# Generate Version Number
+#
+
+# get internal version_info
+
+old_version_number=/\<mezzoVersion\>(.+)\<\/mezzoVersion\>/.match(File.read('pom.xml'))[1]
+#puts old_version_number
+ovnum = old_version_number.split(/[.\s]/)
+
+major_num = ovnum[0]
+padded_minor_num = '%03d' % ovnum[1].to_i
+padded_patch_num = '%03d' % ovnum[2].to_i
+padded_build_num = '%05d' % ENV['BUILD_NUMBER'].to_i
+
+path = ENV['BRANCH'].split('/')
+
+str_maj_rel_level="-"
+str_hf_rel_level="-HF"
+str_rc_rel_level="-RC"
+str_snap_rel_level="-SNAPSHOT"
+
+#####
+##
+## TODO: remove the false rel_level set to SNAPSHOT when we have properly updated the pom for the build
+##
+#####
+case ENV['BRANCH'].downcase
+	when /master/
+		rel_level="#{str_maj_rel_level}"
+		tag_suffix ="#{rel_level}#{padded_build_num}"
+	when /release/
+		rel_level="#{str_maj_rel_level}"
+		tag_suffix ="#{rel_level}#{padded_build_num}"
+	when /hot.?fix/
+		rel_level="#{str_hf_rel_level}"
+		tag_suffix ="#{rel_level}-#{padded_build_num}"
+	when /integration/
+		rel_level="#{str_rc_rel_level}"
+		tag_suffix ="#{rel_level}-#{padded_build_num}"
+	else
+		rel_level="#{str_snap_rel_level}"
+		tag_suffix ="#{rel_level}-#{padded_build_num}-#{ENV['BRANCH']}".upcase.gsub(/[\W_]+/,'-')
+	end
+
+version_number = "#{major_num}.#{padded_minor_num}.#{padded_patch_num}#{tag_suffix}"
+version_replace_cmd = %Q(find . -name "pom.xml" -ls -exec sed -i "s/#{old_version_number}/#{version_number}/g" '{}' \\;)
+STDERR.puts "\n\nVersion Number: #{version_number}\n\n"
+
+if ENV['DESTINATION_STACK'].nil? || ENV['DESTINATION_STACK'].empty?
+  STDERR.puts "Description: #{version_number}"
+else
+  STDERR.puts "Description: #{version_number} -> #{ENV['DESTINATION_STACK']}"
+end
+
+#
+# Create Tag
+#
+
+tag_comment = "BUILD#{padded_build_num} #{version_number} Auto-Tagged by Jenkins"
+tag_update = "BUILD#{padded_build_num} #{version_number} Version Updated by Jenkins"
+#hostname = `hostname`.chomp 
+##Added for jenkins svn tag to be same across all masters and slaves
+hostname = URI.parse(ENV['JENKINS_URL']).host.split('.').first
+tag_url = "#{scm_url}/tags/#{hostname}/#{padded_build_num}"
+
+svn_commands = [
+	"git pull",
+	"git status",
+	%Q(git tag -a v#{version_number} -m "#{tag_comment}" ),
+	"git push --tags",
+	"git status"
+]
+
+###    
+# TODO THIS IS COMMENTED OUT RIGHT NOW!!!!
+# SO THE TAG is NOT being saved
+###
+# do_commands(svn_commands)
+
+
+
+#
+# Set Version Numbers in Pom.xml Files
+#
+do_commands(version_replace_cmd)
+
+#
+# Write Env info to file
+#
+
+vers_output=%Q(\
+MEZZO_VERSION_MAJOR=#{major_num}\n\
+MEZZO_VERSION_MINOR=#{padded_minor_num}\n\
+MEZZO_VERSION_PATCH=#{padded_patch_num}\n\
+GENERATED_VERSION_NUMBER=#{version_number}\n\
+GENERATED_TAG_URL=#{tag_url}\n\
+GENERATED_TAG_SUFFIX=#{tag_suffix}\n\
+GENERATED_BUILD_NUMBER=#{padded_build_num}\n\
+GENERATED_REL_LEVEL=#{rel_level}\n\
+)
+
+File.open('version_info.properties','w') { |f| f.write(vers_output) }
+
+
