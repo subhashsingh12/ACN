@@ -3,7 +3,6 @@
 #
 # Initialization and parameter checking
 #
-
 require 'open3'
 require 'uri'
 
